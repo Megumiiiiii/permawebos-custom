@@ -1,0 +1,786 @@
+diff --git a/arch/android/android/app/src/main/AndroidManifest.xml b/arch/android/android/app/src/main/AndroidManifest.xml
+index 6a3ef7e..f62eba5 100644
+--- a/arch/android/android/app/src/main/AndroidManifest.xml
++++ b/arch/android/android/app/src/main/AndroidManifest.xml
+@@ -40,6 +40,10 @@
+             android:name=".ConfiguratorActivity"
+             android:exported="false"
+             android:screenOrientation="portrait" />
++        <activity
++            android:name=".NodeWalletActivity"
++            android:exported="false"
++            android:screenOrientation="portrait" />
+ 
+         <!-- Setup import: SCAN from the splash, "Open with" / share of a JSON file, and the scriptable
+              IMPORT_CONFIG action. Every path shows a review and stages only on the user's tap. -->
+diff --git a/arch/android/android/app/src/main/java/org/permaweb/andee/ArweaveTx.kt b/arch/android/android/app/src/main/java/org/permaweb/andee/ArweaveTx.kt
+new file mode 100644
+index 0000000..4219169
+--- /dev/null
++++ b/arch/android/android/app/src/main/java/org/permaweb/andee/ArweaveTx.kt
+@@ -0,0 +1,224 @@
++package org.permaweb.andee
++
++import java.io.ByteArrayOutputStream
++import java.math.BigDecimal
++import java.math.BigInteger
++import java.net.HttpURLConnection
++import java.net.URL
++import java.security.MessageDigest
++import java.security.Signature
++import java.security.spec.MGF1ParameterSpec
++import java.security.spec.PSSParameterSpec
++import java.util.Base64
++
++/**
++ * Arweave L1 transfer signing for the node wallet.
++ *
++ * The signing data follows the v2 transaction format used by the network: a SHA-384 deep
++ * hash over [format, owner, target, quantity, reward, last_tx, tags, data_size, data_root]
++ * where the numeric fields sign their decimal strings and the others sign decoded bytes.
++ * The signature itself is RSASSA-PSS over SHA-256 with a 32-byte salt.
++ *
++ * Verified in unit tests against a signature taken from a mined mainnet transfer.
++ */
++internal object ArweaveTx {
++    const val FORMAT = 2
++    const val WINSTON_PER_AR = 1_000_000_000_000L
++    private const val SALT_LENGTH = 32
++
++    private val encoder: Base64.Encoder = Base64.getUrlEncoder().withoutPadding()
++    private val decoder: Base64.Decoder = Base64.getUrlDecoder()
++
++    fun encode(bytes: ByteArray): String = encoder.encodeToString(bytes)
++
++    fun decode(text: String): ByteArray = try {
++        decoder.decode(text)
++    } catch (_: IllegalArgumentException) {
++        ByteArray(0)
++    }
++
++    private fun utf8(value: String): ByteArray = value.toByteArray(Charsets.UTF_8)
++
++    private fun sha384(value: ByteArray): ByteArray =
++        MessageDigest.getInstance("SHA-384").digest(value)
++
++    private fun concat(vararg parts: ByteArray): ByteArray {
++        var size = 0
++        for (part in parts) size += part.size
++        val out = ByteArray(size)
++        var offset = 0
++        for (part in parts) {
++            part.copyInto(out, offset)
++            offset += part.size
++        }
++        return out
++    }
++
++    /** Blobs hash as sha384(tag || blob); lists fold their children into the tag hash. */
++    private fun deepHash(item: Any): ByteArray = when (item) {
++        is ByteArray -> {
++            val tag = concat(utf8("blob"), utf8(item.size.toString()))
++            sha384(concat(sha384(tag), sha384(item)))
++        }
++        is List<*> -> {
++            var acc = sha384(concat(utf8("list"), utf8(item.size.toString())))
++            for (child in item) {
++                acc = sha384(concat(acc, deepHash(child ?: ByteArray(0))))
++            }
++            acc
++        }
++        else -> throw IllegalArgumentException("unsupported deep hash item")
++    }
++
++    fun signingData(
++        format: Int,
++        owner: ByteArray,
++        target: ByteArray,
++        quantity: String,
++        reward: String,
++        lastTx: ByteArray,
++        tags: List<Pair<String, String>>,
++        dataSize: String,
++        dataRoot: ByteArray,
++    ): ByteArray {
++        val tagList: List<Any> = tags.map { (name, value) -> listOf(utf8(name), utf8(value)) }
++        return deepHash(
++            listOf(
++                utf8(format.toString()),
++                owner,
++                target,
++                utf8(quantity),
++                utf8(reward),
++                lastTx,
++                tagList,
++                utf8(dataSize),
++                dataRoot,
++            ),
++        )
++    }
++
++    private fun pss(): PSSParameterSpec =
++        PSSParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA256, SALT_LENGTH, 1)
++
++    fun sign(wallet: ArweaveWallet, data: ByteArray): ByteArray {
++        val signature = Signature.getInstance("RSASSA-PSS")
++        signature.setParameter(pss())
++        signature.initSign(wallet.privateKey())
++        signature.update(data)
++        return signature.sign()
++    }
++
++    fun verify(wallet: ArweaveWallet, data: ByteArray, signatureBytes: ByteArray): Boolean = try {
++        val signature = Signature.getInstance("RSASSA-PSS")
++        signature.setParameter(pss())
++        signature.initVerify(wallet.publicKey())
++        signature.update(data)
++        signature.verify(signatureBytes)
++    } catch (_: Exception) {
++        false
++    }
++
++    fun transactionId(signatureBytes: ByteArray): String =
++        encode(MessageDigest.getInstance("SHA-256").digest(signatureBytes))
++
++    fun arToWinston(amount: String): BigInteger {
++        val value = BigDecimal(amount.trim())
++        require(value.signum() >= 0) { "amount must not be negative" }
++        return value.multiply(BigDecimal(WINSTON_PER_AR)).toBigIntegerExact()
++    }
++
++    fun winstonToAr(amount: String): String {
++        val value = BigDecimal(amount.trim())
++        return value.divide(BigDecimal(WINSTON_PER_AR)).stripTrailingZeros().toPlainString()
++    }
++
++    fun isAddress(value: String): Boolean =
++        value.length == 43 && value.all { it.isLetterOrDigit() || it == '-' || it == '_' }
++
++    /**
++     * Body accepted by POST /tx: decimal quantities, empty data, no tags.
++     *
++     * Built by hand so the exact wire form is unit-testable without an Android JSON runtime.
++     */
++    fun transferBody(
++        id: String,
++        owner: String,
++        target: String,
++        quantity: String,
++        reward: String,
++        lastTx: String,
++        signature: String,
++    ): String {
++        require(id.length == 43 && target.length == 43 && lastTx.isNotEmpty()) { "invalid transfer fields" }
++        require(owner.isNotEmpty() && signature.isNotEmpty()) { "invalid transfer fields" }
++        require(quantity.all { it.isDigit() } && reward.all { it.isDigit() }) { "invalid amounts" }
++        return buildString {
++            append('{')
++            append("\"format\":").append(FORMAT).append(',')
++            append("\"id\":\"").append(id).append("\",")
++            append("\"last_tx\":\"").append(lastTx).append("\",")
++            append("\"owner\":\"").append(owner).append("\",")
++            append("\"tags\":[],")
++            append("\"target\":\"").append(target).append("\",")
++            append("\"quantity\":\"").append(quantity).append("\",")
++            append("\"data\":\"\",")
++            append("\"reward\":\"").append(reward).append("\",")
++            append("\"signature\":\"").append(signature).append('"')
++            append('}')
++        }
++    }
++}
++
++/** Tiny JSON-over-HTTP client for the gateway endpoints used by the wallet screen. */
++internal object ArweaveHttp {
++    private const val CONNECT_TIMEOUT_MS = 8000
++    private const val READ_TIMEOUT_MS = 15000
++
++    class Failure(message: String) : Exception(message)
++
++    fun get(url: String): String {
++        val connection = URL(url).openConnection() as HttpURLConnection
++        return try {
++            connection.connectTimeout = CONNECT_TIMEOUT_MS
++            connection.readTimeout = READ_TIMEOUT_MS
++            connection.setRequestProperty("accept", "application/json")
++            val code = connection.responseCode
++            if (code !in 200..299) throw Failure("HTTP $code from $url")
++            connection.inputStream.use { it.readBytes().toString(Charsets.UTF_8) }
++        } catch (e: Failure) {
++            throw e
++        } catch (e: Exception) {
++            throw Failure(e.message ?: "request failed")
++        } finally {
++            connection.disconnect()
++        }
++    }
++
++    fun postJson(url: String, body: String): String {
++        val connection = URL(url).openConnection() as HttpURLConnection
++        return try {
++            connection.requestMethod = "POST"
++            connection.connectTimeout = CONNECT_TIMEOUT_MS
++            connection.readTimeout = READ_TIMEOUT_MS
++            connection.doOutput = true
++            connection.setRequestProperty("content-type", "application/json")
++            connection.setRequestProperty("accept", "application/json")
++            connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
++            val code = connection.responseCode
++            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
++            val text = stream?.use { input ->
++                val out = ByteArrayOutputStream()
++                input.copyTo(out)
++                out.toString("UTF-8")
++            }.orEmpty()
++            if (code !in 200..299) throw Failure("HTTP $code: ${text.take(200)}")
++            text
++        } catch (e: Failure) {
++            throw e
++        } catch (e: Exception) {
++            throw Failure(e.message ?: "request failed")
++        } finally {
++            connection.disconnect()
++        }
++    }
++}
+\ No newline at end of file
+diff --git a/arch/android/android/app/src/main/java/org/permaweb/andee/ArweaveWallet.kt b/arch/android/android/app/src/main/java/org/permaweb/andee/ArweaveWallet.kt
+new file mode 100644
+index 0000000..6f6af4c
+--- /dev/null
++++ b/arch/android/android/app/src/main/java/org/permaweb/andee/ArweaveWallet.kt
+@@ -0,0 +1,58 @@
++package org.permaweb.andee
++
++import org.json.JSONObject
++import java.math.BigInteger
++import java.security.KeyFactory
++import java.security.MessageDigest
++import java.security.PrivateKey
++import java.security.PublicKey
++import java.security.spec.RSAPrivateCrtKeySpec
++import java.security.spec.RSAPublicKeySpec
++import java.util.Base64
++
++/**
++ * The node identity wallet (HyperBEAM key file, RSA-4096 JWK).
++ *
++ * Only read for balance display and for signing a transfer the user asked for; the key
++ * never leaves app-private storage and is never logged.
++ */
++internal class ArweaveWallet private constructor(private val jwk: JSONObject) {
++    private val decoder: Base64.Decoder = Base64.getUrlDecoder()
++    private val encoder: Base64.Encoder = Base64.getUrlEncoder().withoutPadding()
++
++    val modulusBase64Url: String = jwk.getString("n")
++
++    private fun bytes(field: String): ByteArray = decoder.decode(jwk.getString(field))
++
++    /** Arweave L1 address: base64url(sha256(modulus)). */
++    val address: String
++        get() = encoder.encodeToString(MessageDigest.getInstance("SHA-256").digest(bytes("n")))
++
++    fun privateKey(): PrivateKey = KeyFactory.getInstance("RSA").generatePrivate(
++        RSAPrivateCrtKeySpec(
++            BigInteger(1, bytes("n")),
++            BigInteger(1, bytes("e")),
++            BigInteger(1, bytes("d")),
++            BigInteger(1, bytes("p")),
++            BigInteger(1, bytes("q")),
++            BigInteger(1, bytes("dp")),
++            BigInteger(1, bytes("dq")),
++            BigInteger(1, bytes("qi")),
++        ),
++    )
++
++    fun publicKey(): PublicKey = KeyFactory.getInstance("RSA").generatePublic(
++        RSAPublicKeySpec(BigInteger(1, bytes("n")), BigInteger(1, bytes("e"))),
++    )
++
++    companion object {
++        fun fromJwk(text: String): ArweaveWallet {
++            val json = JSONObject(text)
++            require(json.optString("kty") == "RSA") { "node wallet is not an RSA JWK" }
++            for (field in listOf("n", "e", "d", "p", "q", "dp", "dq", "qi")) {
++                require(json.optString(field).isNotEmpty()) { "node wallet is missing $field" }
++            }
++            return ArweaveWallet(json)
++        }
++    }
++}
+\ No newline at end of file
+diff --git a/arch/android/android/app/src/main/java/org/permaweb/andee/NodeWalletActivity.kt b/arch/android/android/app/src/main/java/org/permaweb/andee/NodeWalletActivity.kt
+new file mode 100644
+index 0000000..d3cb65d
+--- /dev/null
++++ b/arch/android/android/app/src/main/java/org/permaweb/andee/NodeWalletActivity.kt
+@@ -0,0 +1,318 @@
++package org.permaweb.andee
++
++import android.app.Activity
++import android.app.AlertDialog
++import android.graphics.Color
++import android.graphics.Typeface
++import android.graphics.drawable.GradientDrawable
++import android.os.Bundle
++import android.text.InputType
++import android.view.Gravity
++import android.view.View
++import android.widget.Button
++import android.widget.EditText
++import android.widget.LinearLayout
++import android.widget.ScrollView
++import android.widget.TextView
++import android.widget.Toast
++import org.json.JSONObject
++
++/**
++ * Node wallet: the AR held by the AndEE node identity.
++ *
++ * Read-only until the user asks for a transfer; signing uses the app-private HyperBEAM key
++ * ([AndeePaths.nodeWalletFile]) and the signed transaction is posted straight to the gateway.
++ * Nothing is broadcast without the confirmation dialog.
++ */
++class NodeWalletActivity : Activity() {
++    private val gateway = "https://arweave.net"
++    private val density by lazy { resources.displayMetrics.density }
++
++    private lateinit var balanceView: TextView
++    private lateinit var addressView: TextView
++    private lateinit var recipientInput: EditText
++    private lateinit var amountInput: EditText
++    private lateinit var beneficiaryInput: EditText
++    private lateinit var statusView: TextView
++    private lateinit var sendButton: Button
++
++    private var wallet: ArweaveWallet? = null
++
++    override fun onCreate(savedInstanceState: Bundle?) {
++        super.onCreate(savedInstanceState)
++        val root = LinearLayout(this).apply {
++            orientation = LinearLayout.VERTICAL
++            setBackgroundColor(AndeePalette.background)
++            setPadding(dp(22f), dp(28f), dp(22f), dp(28f))
++        }
++
++        root.addView(
++            textButton("← NODE WALLET") { finish() },
++            LinearLayout.LayoutParams(
++                LinearLayout.LayoutParams.WRAP_CONTENT,
++                LinearLayout.LayoutParams.WRAP_CONTENT,
++            ),
++        )
++        root.addView(label("AR balance held by this node", accent = true, size = 10f))
++        balanceView = label("…", size = 30f, color = AndeePalette.ink)
++        root.addView(balanceView)
++        addressView = label("", size = 9f, color = AndeePalette.inkMuted)
++        root.addView(addressView)
++
++        root.addView(divider())
++        root.addView(label("SEND AR TO A WALLET", accent = true, size = 10f))
++        root.addView(label("Transfer is signed by the node key and posted to ${gateway.replace("https://", "")}.", size = 9f, color = AndeePalette.inkMuted))
++        recipientInput = input("Recipient address", InputType.TYPE_CLASS_TEXT)
++        root.addView(recipientInput)
++        amountInput = input("Amount in AR", InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL)
++        root.addView(amountInput)
++        sendButton = primaryButton("SEND") { confirmSend() }
++        root.addView(sendButton)
++
++        root.addView(divider())
++        root.addView(label("BUNDLER BENEFICIARY", accent = true, size = 10f))
++        root.addView(
++            label(
++                "Where the node's bundling income is settled. Staged for the next boot; tap APPLY & CLOSE on the node screen to restart with it.",
++                size = 9f,
++                color = AndeePalette.inkMuted,
++            ),
++        )
++        beneficiaryInput = input("Beneficiary address (defaults to the sender)", InputType.TYPE_CLASS_TEXT)
++        root.addView(beneficiaryInput)
++        root.addView(primaryButton("STAGE FOR NEXT BOOT") { stageBeneficiary() })
++
++        root.addView(divider())
++        statusView = label("", size = 10f, color = AndeePalette.inkMuted)
++        root.addView(statusView)
++
++        setContentView(
++            ScrollView(this).apply {
++                setBackgroundColor(AndeePalette.background)
++                addView(root)
++            },
++        )
++
++        loadWallet()
++        refreshBalance()
++    }
++
++    private fun dp(value: Float): Int = (value * density).toInt().coerceAtLeast(1)
++
++    private fun label(
++        text: String,
++        accent: Boolean = false,
++        size: Float = 11f,
++        color: Int = AndeePalette.inkStrong,
++    ) = TextView(this).apply {
++        this.text = text
++        typeface = Typeface.MONOSPACE
++        textSize = size
++        setTextColor(if (accent) AndeePalette.accentBright else color)
++        setPadding(0, dp(6f), 0, dp(6f))
++    }
++
++    private fun divider() = View(this).apply {
++        setBackgroundColor(AndeePalette.panel)
++        layoutParams = LinearLayout.LayoutParams(
++            LinearLayout.LayoutParams.MATCH_PARENT,
++            dp(1f),
++        ).apply { topMargin = dp(14f) }
++    }
++
++    private fun input(hintText: String, inputType: Int) = EditText(this).apply {
++        hint = hintText
++        typeface = Typeface.MONOSPACE
++        textSize = 12f
++        setTextColor(AndeePalette.ink)
++        setHintTextColor(AndeePalette.inkMuted)
++        setInputType(inputType)
++        background = GradientDrawable().apply {
++            cornerRadius = 0f
++            setColor(AndeePalette.backgroundDeep)
++            setStroke(dp(1f), AndeePalette.panel)
++        }
++        setPadding(dp(10f), dp(9f), dp(10f), dp(9f))
++        layoutParams = LinearLayout.LayoutParams(
++            LinearLayout.LayoutParams.MATCH_PARENT,
++            LinearLayout.LayoutParams.WRAP_CONTENT,
++        ).apply { topMargin = dp(8f) }
++    }
++
++    private fun primaryButton(text: String, action: () -> Unit) = Button(this).apply {
++        this.text = text
++        typeface = Typeface.MONOSPACE
++        textSize = 12f
++        isAllCaps = false
++        setTextColor(AndeePalette.backgroundDeep)
++        background = GradientDrawable().apply {
++            cornerRadius = 0f
++            setColor(AndeePalette.accent)
++        }
++        layoutParams = LinearLayout.LayoutParams(
++            LinearLayout.LayoutParams.MATCH_PARENT,
++            dp(44f),
++        ).apply { topMargin = dp(12f) }
++        setOnClickListener { action() }
++    }
++
++    private fun textButton(text: String, action: () -> Unit) = Button(this).apply {
++        this.text = text
++        typeface = Typeface.MONOSPACE
++        textSize = 11f
++        isAllCaps = false
++        setTextColor(AndeePalette.accentBright)
++        setBackgroundColor(Color.TRANSPARENT)
++        setPadding(0, 0, 0, 0)
++        gravity = Gravity.START
++        setOnClickListener { action() }
++    }
++
++    private fun loadWallet() {
++        val file = AndeePaths.nodeWalletFile(this)
++        wallet = try {
++            if (!file.isFile) null else ArweaveWallet.fromJwk(file.readText(Charsets.UTF_8))
++        } catch (e: Exception) {
++            setStatus("Node key tidak terbaca: ${e.message}")
++            null
++        }
++        val loaded = wallet
++        if (loaded == null) {
++            balanceView.text = "—"
++            addressView.text = "Belum ada identitas node di perangkat ini. Jalankan node dulu."
++            sendButton.isEnabled = false
++            return
++        }
++        addressView.text = loaded.address
++        beneficiaryInput.hint = "Beneficiary address (${loaded.address.take(6)}…${loaded.address.takeLast(4)})"
++    }
++
++    private fun refreshBalance() {
++        val loaded = wallet ?: return
++        balanceView.text = "…"
++        Thread {
++            val text = try {
++                val winston = ArweaveHttp.get("$gateway/wallet/${loaded.address}/balance").trim()
++                "${ArweaveTx.winstonToAr(winston)} AR"
++            } catch (e: Exception) {
++                "tidak tersedia"
++            }
++            runOnUiThread { balanceView.text = text }
++        }.start()
++    }
++
++    private fun setStatus(message: String) {
++        runOnUiThread { statusView.text = message }
++    }
++
++    private fun confirmSend() {
++        val loaded = wallet ?: return
++        val recipient = recipientInput.text.toString().trim()
++        val amount = amountInput.text.toString().trim()
++        if (!ArweaveTx.isAddress(recipient)) {
++            setStatus("Alamat tujuan harus 43 karakter base64url.")
++            return
++        }
++        if (recipient == loaded.address) {
++            setStatus("Tujuan sama dengan wallet node; pakai wallet lain.")
++            return
++        }
++        val quantity = try {
++            ArweaveTx.arToWinston(amount)
++        } catch (e: Exception) {
++            setStatus("Jumlah AR tidak valid.")
++            return
++        }
++        if (quantity.signum() <= 0) {
++            setStatus("Jumlah harus lebih dari 0.")
++            return
++        }
++        setStatus("Menghitung fee…")
++        Thread {
++            try {
++                val reward = ArweaveHttp.get("$gateway/price/0").trim()
++                val lastTx = ArweaveHttp.get("$gateway/tx_anchor").trim()
++                runOnUiThread {
++                    setStatus("")
++                    AlertDialog.Builder(this)
++                        .setTitle("Kirim ${ArweaveTx.winstonToAr(quantity.toString())} AR?")
++                        .setMessage(
++                            "Dari node ${loaded.address}\n" +
++                                "Ke $recipient\n" +
++                                "Fee jaringan ${ArweaveTx.winstonToAr(reward)} AR",
++                        )
++                        .setNegativeButton("Batal", null)
++                        .setPositiveButton("Kirim") { _, _ ->
++                            submit(loaded, recipient, quantity.toString(), reward, lastTx)
++                        }
++                        .show()
++                }
++            } catch (e: Exception) {
++                setStatus("Gagal menyiapkan transaksi: ${e.message}")
++            }
++        }.start()
++    }
++
++    private fun submit(
++        loaded: ArweaveWallet,
++        recipient: String,
++        quantity: String,
++        reward: String,
++        lastTx: String,
++    ) {
++        setStatus("Menandatangani…")
++        Thread {
++            try {
++                val data = ArweaveTx.signingData(
++                    format = ArweaveTx.FORMAT,
++                    owner = ArweaveTx.decode(loaded.modulusBase64Url),
++                    target = ArweaveTx.decode(recipient),
++                    quantity = quantity,
++                    reward = reward,
++                    lastTx = ArweaveTx.decode(lastTx),
++                    tags = emptyList(),
++                    dataSize = "0",
++                    dataRoot = ByteArray(0),
++                )
++                val signature = ArweaveTx.sign(loaded, data)
++                val id = ArweaveTx.transactionId(signature)
++                val body = ArweaveTx.transferBody(
++                    id = id,
++                    owner = loaded.modulusBase64Url,
++                    target = recipient,
++                    quantity = quantity,
++                    reward = reward,
++                    lastTx = lastTx,
++                    signature = ArweaveTx.encode(signature),
++                )
++                ArweaveHttp.postJson("$gateway/tx", body)
++                runOnUiThread {
++                    setStatus("Terkirim. TX $id")
++                    recipientInput.setText("")
++                    amountInput.setText("")
++                }
++                Thread.sleep(1500L)
++                refreshBalance()
++            } catch (e: Exception) {
++                setStatus("Gagal mengirim: ${e.message}")
++            }
++        }.start()
++    }
++
++    private fun stageBeneficiary() {
++        val loaded = wallet
++        val value = beneficiaryInput.text.toString().trim().ifEmpty { loaded?.address.orEmpty() }
++        if (!ArweaveTx.isAddress(value)) {
++            setStatus("Alamat beneficiary harus 43 karakter base64url.")
++            return
++        }
++        try {
++            val overlay = JSONObject().put("bundler-beneficiary", value)
++            AndeeBootConfigStore.stageNextBootConfig(this, overlay.toString())
++            setStatus("Beneficiary $value disiapkan. Tutup app lalu APPLY & CLOSE untuk restart node.")
++            Toast.makeText(this, "Menunggu APPLY & CLOSE", Toast.LENGTH_LONG).show()
++        } catch (e: Exception) {
++            setStatus("Gagal menyiapkan config: ${e.message}")
++        }
++    }
++}
+\ No newline at end of file
+diff --git a/arch/android/android/app/src/main/res/drawable/ic_node_wallet.xml b/arch/android/android/app/src/main/res/drawable/ic_node_wallet.xml
+new file mode 100644
+index 0000000..71bf46f
+--- /dev/null
++++ b/arch/android/android/app/src/main/res/drawable/ic_node_wallet.xml
+@@ -0,0 +1,6 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="22dp" android:height="22dp" android:viewportWidth="24" android:viewportHeight="24">
++    <path android:fillColor="@android:color/transparent" android:strokeColor="#FFFFFF"
++        android:strokeWidth="1.8" android:strokeLineCap="round" android:strokeLineJoin="round"
++        android:pathData="M3,8a2,2 0,0 1,2,-2h13a2,2 0,0 1,2,2v9a2,2 0,0 1,-2,2H5a2,2 0,0 1,-2,-2zM3,10h18M16.5,14.5h2" />
++</vector>
+diff --git a/arch/android/android/app/src/test/java/org/permaweb/andee/ArweaveTxTest.kt b/arch/android/android/app/src/test/java/org/permaweb/andee/ArweaveTxTest.kt
+new file mode 100644
+index 0000000..07577c9
+--- /dev/null
++++ b/arch/android/android/app/src/test/java/org/permaweb/andee/ArweaveTxTest.kt
+@@ -0,0 +1,116 @@
++package org.permaweb.andee
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import java.math.BigInteger
++import java.security.KeyFactory
++import java.security.MessageDigest
++import java.security.Signature
++import java.security.spec.MGF1ParameterSpec
++import java.security.spec.PSSParameterSpec
++import java.security.spec.RSAPublicKeySpec
++
++/**
++ * The signing data must reproduce what the network accepted, so the fixture is a transfer that
++ * is already mined: the deep hash has to match, and the recorded signature has to verify against
++ * the recorded owner key. Kept as key=value so the test needs no JSON parser.
++ */
++class ArweaveTxTest {
++    private val fixture: Map<String, String> by lazy {
++        val text = javaClass.getResourceAsStream("/arweave/mainnet-transfer.properties")!!
++            .use { it.readBytes().toString(Charsets.UTF_8) }
++        text.lineSequence()
++            .map { it.trim() }
++            .filter { it.isNotEmpty() && !it.startsWith("#") }
++            .associate { line ->
++                val index = line.indexOf('=')
++                line.substring(0, index) to line.substring(index + 1)
++            }
++    }
++
++    private fun field(name: String) = requireNotNull(fixture[name]) { "fixture missing $name" }
++
++    private fun publicKey() = KeyFactory.getInstance("RSA").generatePublic(
++        RSAPublicKeySpec(
++            BigInteger(1, ArweaveTx.decode(field("owner"))),
++            BigInteger.valueOf(65537),
++        ),
++    )
++
++    private fun verifier(data: ByteArray) = Signature.getInstance("RSASSA-PSS").apply {
++        setParameter(PSSParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA256, 32, 1))
++        initVerify(publicKey())
++        update(data)
++    }
++
++    private fun signingDataForFixture(): ByteArray = ArweaveTx.signingData(
++        format = field("format").toInt(),
++        owner = ArweaveTx.decode(field("owner")),
++        target = ArweaveTx.decode(field("target")),
++        quantity = field("quantity"),
++        reward = field("reward"),
++        lastTx = ArweaveTx.decode(field("last_tx")),
++        tags = emptyList(),
++        dataSize = field("data_size"),
++        dataRoot = ArweaveTx.decode(field("data_root")),
++    )
++
++    @Test
++    fun signingDataMatchesTheMinedTransfer() {
++        val expected = "795740d52812125518f98868cdbdb802e05f8665723c5b825183ef73dbb931f8" +
++            "28e3c2f8900e284b77c784c82e2ab981"
++        assertEquals(expected, signingDataForFixture().joinToString("") { "%02x".format(it) })
++    }
++
++    @Test
++    fun minedSignatureVerifiesAndMatchesTheTransactionId() {
++        val signature = ArweaveTx.decode(field("signature"))
++        assertTrue(verifier(signingDataForFixture()).verify(signature))
++        assertEquals(field("id"), ArweaveTx.transactionId(signature))
++    }
++
++    @Test
++    fun addressIsTheModulusHashInBase64Url() {
++        val address = ArweaveTx.encode(
++            MessageDigest.getInstance("SHA-256").digest(ArweaveTx.decode(field("owner"))),
++        )
++        assertEquals(43, address.length)
++        assertTrue(ArweaveTx.isAddress(address))
++    }
++
++    @Test
++    fun tamperedSigningDataFailsVerification() {
++        val signature = ArweaveTx.decode(field("signature"))
++        val tampered = signingDataForFixture().copyOf().also { it[0] = (it[0] + 1).toByte() }
++        assertFalse(verifier(tampered).verify(signature))
++    }
++
++    @Test
++    fun amountsRoundTripBetweenArAndWinston() {
++        assertEquals("1250000000000", ArweaveTx.arToWinston("1.25").toString())
++        assertEquals("1.25", ArweaveTx.winstonToAr("1250000000000"))
++        assertEquals("0", ArweaveTx.arToWinston("0").toString())
++        assertTrue(ArweaveTx.isAddress("R5cJahCAe0yh6aBorMlQUoLFbviCLo3AvGFo3FXyW00"))
++        assertFalse(ArweaveTx.isAddress("not-an-address"))
++    }
++
++    @Test
++    fun transferBodyCarriesDecimalQuantitiesAndNoData() {
++        val body = ArweaveTx.transferBody(
++            id = "i".repeat(43),
++            owner = "o".repeat(683),
++            target = "R5cJahCAe0yh6aBorMlQUoLFbviCLo3AvGFo3FXyW00",
++            quantity = "1250000000000",
++            reward = "554288799576",
++            lastTx = "l".repeat(43),
++            signature = "s".repeat(683),
++        )
++        assertTrue(body.contains("\"format\":2"))
++        assertTrue(body.contains("\"quantity\":\"1250000000000\""))
++        assertTrue(body.contains("\"reward\":\"554288799576\""))
++        assertTrue(body.contains("\"data\":\"\""))
++        assertTrue(body.contains("\"tags\":[]"))
++    }
++}
+diff --git a/arch/android/android/app/src/test/resources/arweave/mainnet-transfer.properties b/arch/android/android/app/src/test/resources/arweave/mainnet-transfer.properties
+new file mode 100644
+index 0000000..c1e03eb
+--- /dev/null
++++ b/arch/android/android/app/src/test/resources/arweave/mainnet-transfer.properties
+@@ -0,0 +1,10 @@
++format=2
++id=KdNOhWuIqMOXvB2v0Mznb6DeqYW4lMxO-FdipKnWXmU
++last_tx=V_wThiuhJ07tk4UkB6zBSUf8l15KA8roz9f42kw8J-TavvFrKPJeL-s-CDtritBp
++owner=k1Zm5c3Vtybkrt1h4Ti_J35zv5RaAmE-DF_2qQs1aIlTOl4hheaxiIvmOxEC4gMftjzRJufz6wcAlzNahJ1zIjiQH-uNq9c00_8sp9BJHXVCP_LS_vtlzlMwKP1z8qelVRbOwTy2Oikt8aiKk64WP_cMN6jkCSIa8xwpuwnRTeKe99EcqLS1Kpffh4Df2m6Y_J4_0c6ih3NdRdbaq5ImTN0-s0zSkCAcM2euzLGWi3D7l21Zh16k8AoXa4kAJ2DBE_D2T6VNtFqa0LXpxwYbySTr5FR_Su4Arv_eQRxSUepEy-tgG_GNlZlmwfQqZsLZU_GxGx2A0cXphJyQVgnSIcs_RsANysj2U3l6s79tNs6oKCsGRWG8LhZcJ2feYRnQ3tR3lbgCnFtWX4iI0IEu2T6TQulntE1Lmfs3PVumKlST_xQAo9YBGsJECoAq9ztdxC92R5OCdr_j0gT1pzVU1ZJ2dJgsRtFV3IGoZXWVzFbMxKMJPsr_Xa8JeW08u3r7KVyLod1bai3_zPW8-n2lCotuPRgbW8qsp6ZH9JziVOSVTg6jRyySia-0JX7qSPrEFV74TKnWChE9bA9VUIHJJGLwaqT-Cn4PDQcmGb2ikgy_qsJgxg5iDWsbuFOIEV9-9VSEO1-tdZxdNtSBfIjO0hd4Wdtxb4rmOqjBGYVfDXk
++target=abu_Y-i0v5hKm8vr8Fi5WN4eslz_OTW09uanMqnZSlM
++quantity=1693526740000000
++reward=554288799576
++signature=CQhu42abW8nRQ5bF6Lw-NBH5gxjAJ3tbqG0z6vdBZBnZAmmQ6h-hgdNqJh3Wxt5aPrE814oE2prUGQ3y3VaJvlhcqnWzogF-IAOlYc2qzGCWnSEqv2a1NMxTk0xUE5RY1rNAL4LUadnMd2P6y-gRVbMpUc3xv5aoPg0EaXUWpCQ3W4nTDm9_MKkjP0rSatk0K2tR69IsW7SBI94ZOR8_10dxRR6Ugqd0IXlTmDi8EImo0i1pRO6uAe9K4V-hr1t6s6RukQJ7uuFVm0sdNhrbw0nje_XsvSGpQMPZ_Q0OT1o0SMIeN93idIpwY3nEshwmWc949pDDR105BAxWwesJb47VVebamS4qPPcPgljdf3bBoCZznGyTffy6Awz1CENG9M6oa5LhkvduySgreb45t8vy8GExFx3tTGaoqNC92GbyMzh_ZVuAJsAxAoi7u09Q23DZe8_LfbIW-8_Vw8-ZueI4hhvVHdRR6Qm7yLzH4wGK2JmfwDf5OH764NHMtwmqzdfPPiJiUNcJmywQFBcrPcQWO5CALK_1XHc7-szt0RhS58sWy7Peb1WgRBosn0wIWB-_yxO-GzO2aHgwMvDYHRRo_Wqlt29F8RVisCaz-plxvIIh3kdqkKri4W4tVrP4mlSC3K0hWmvQyiu9Zq6MH2uO3zSehGokCqNd74HtBaw
++data_size=0
++data_root=

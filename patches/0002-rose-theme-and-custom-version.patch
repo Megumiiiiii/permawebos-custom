@@ -1,5 +1,5 @@
 diff --git a/arch/android/android/app/build.gradle.kts b/arch/android/android/app/build.gradle.kts
-index 842f11f..9ae6d17 100644
+index 842f11f..7d383dd 100644
 --- a/arch/android/android/app/build.gradle.kts
 +++ b/arch/android/android/app/build.gradle.kts
 @@ -10,8 +10,8 @@ android {
@@ -8,7 +8,7 @@ index 842f11f..9ae6d17 100644
          targetSdk = 36
 -        versionCode = 1
 -        versionName = "0.11"
-+        versionCode = 2
++        versionCode = 3
 +        versionName = "custom"
          val configuratorUrl = providers.gradleProperty("andeeConfiguratorUrl")
              .getOrElse("https://bundler.mystical.computer/GKWEPkK-GUJYx3JTAJ-aCR6ZgshVW9naSueDZOeiXhc~manifest@1.0/")
@@ -64,7 +64,7 @@ index 0000000..fdb9b90
 +    val warning = Color.rgb(164, 76, 0)
 +}
 diff --git a/arch/android/android/app/src/main/java/org/permaweb/andee/OrnamentActivity.kt b/arch/android/android/app/src/main/java/org/permaweb/andee/OrnamentActivity.kt
-index 838c566..22f9be0 100644
+index 838c566..63ef611 100644
 --- a/arch/android/android/app/src/main/java/org/permaweb/andee/OrnamentActivity.kt
 +++ b/arch/android/android/app/src/main/java/org/permaweb/andee/OrnamentActivity.kt
 @@ -15,6 +15,8 @@ import android.graphics.BitmapFactory
@@ -76,7 +76,22 @@ index 838c566..22f9be0 100644
  import android.graphics.Rect
  import android.graphics.RectF
  import android.graphics.Typeface
-@@ -283,7 +285,10 @@ private class OrnamentView(
+@@ -83,6 +85,9 @@ class OrnamentActivity : Activity() {
+                             .setAction(SetupImportActivity.ACTION_SCAN),
+                     )
+                 }
++                override fun wallet() {
++                    startActivity(Intent(this@OrnamentActivity, NodeWalletActivity::class.java))
++                }
+             },
+         )
+         setContentView(ornamentView)
+@@ -279,11 +284,15 @@ private class OrnamentView(
+         fun copyNode(url: String)
+         fun configure()
+         fun scan()
++        fun wallet()
+     }
  
      private val mono = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
      private val splashMark by lazy { BitmapFactory.decodeResource(resources, R.drawable.os_splash_mark) }
@@ -88,7 +103,7 @@ index 838c566..22f9be0 100644
      private val nodeStatus = AtomicReference(NodeStatus.booting())
      private val nextBootConfigPending = AtomicBoolean(AndeeBootConfigStore.hasPending(context))
      private val presentationActive = AtomicBoolean(false)
-@@ -317,17 +322,17 @@ private class OrnamentView(
+@@ -317,17 +326,17 @@ private class OrnamentView(
      private val qrDrawBounds = RectF()
  
      private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -109,7 +124,15 @@ index 838c566..22f9be0 100644
          typeface = mono
          isSubpixelText = true
      }
-@@ -360,7 +365,7 @@ private class OrnamentView(
+@@ -353,6 +362,7 @@ private class OrnamentView(
+         }
+     }
+     private val settingsButton = iconButton(R.drawable.ic_setup_settings, "Node settings") { actions.configure() }
++    private val walletButton = iconButton(R.drawable.ic_node_wallet, "Node wallet") { actions.wallet() }
+     private val importButton = iconButton(R.drawable.ic_setup_import, "Import configuration JSON") { actions.pickNextBootConfig() }
+     private val copyUrlButton = iconButton(R.drawable.ic_node_copy, "Copy node URL") {
+         val status = nodeStatus.get()
+@@ -360,12 +370,12 @@ private class OrnamentView(
      }.apply {
          visibility = View.INVISIBLE
          scaleType = ImageView.ScaleType.FIT_CENTER
@@ -118,7 +141,21 @@ index 838c566..22f9be0 100644
      }
      private val controls = LinearLayout(context).apply {
          orientation = LinearLayout.HORIZONTAL
-@@ -382,7 +387,7 @@ private class OrnamentView(
+         gravity = Gravity.CENTER_VERTICAL
+-        for (button in listOf(settingsButton, importButton)) {
++        for (button in listOf(settingsButton, walletButton, importButton)) {
+             addView(button, LinearLayout.LayoutParams(dp(48f).toInt(), dp(48f).toInt()).apply {
+                 if (button === importButton) marginStart = dp(8f).toInt()
+             })
+@@ -375,14 +385,14 @@ private class OrnamentView(
+     init {
+         setWillNotDraw(false)
+         addView(setupButton, LayoutParams(dp(132f).toInt(), dp(48f).toInt()))
+-        addView(controls, LayoutParams(dp(104f).toInt(), dp(48f).toInt()))
++        addView(controls, LayoutParams(dp(160f).toInt(), dp(48f).toInt()))
+         addView(copyUrlButton, LayoutParams(dp(48f).toInt(), dp(48f).toInt()))
+         updateControls()
+     }
  
      private fun iconButton(icon: Int, label: String, action: () -> Unit) = ImageButton(context).apply {
          setImageResource(icon)
@@ -127,7 +164,7 @@ index 838c566..22f9be0 100644
          setPadding(dp(13f).toInt(), dp(13f).toInt(), dp(13f).toInt(), dp(13f).toInt())
          background = controlBackground(primary = false)
          contentDescription = label
-@@ -393,20 +398,26 @@ private class OrnamentView(
+@@ -393,20 +403,26 @@ private class OrnamentView(
      private fun controlBackground(primary: Boolean, pending: Boolean = false): RippleDrawable {
          val shape = GradientDrawable().apply {
              cornerRadius = 0f
@@ -159,7 +196,16 @@ index 838c566..22f9be0 100644
              setBounds(0, 0, dp(16f).toInt(), dp(16f).toInt())
          }
          setupButton.setCompoundDrawablesRelative(icon, null, null, null)
-@@ -619,7 +630,7 @@ private class OrnamentView(
+@@ -444,7 +460,7 @@ private class OrnamentView(
+         val contentWidth = labelWidth + iconWidth + if (iconWidth > 0) setupButton.compoundDrawablePadding else 0
+         val padding = ((qrWidth - contentWidth) / 2f).toInt().coerceAtLeast(dp(6f).toInt())
+         setupButton.setPadding(padding, 0, padding, 0)
+-        controls.layoutParams.width = dp(if (importButton.visibility == View.GONE) 48f else 104f).toInt()
++        controls.layoutParams.width = dp(if (importButton.visibility == View.GONE) 112f else 160f).toInt()
+         super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+     }
+ 
+@@ -619,7 +635,7 @@ private class OrnamentView(
          val labelX = greeterMargin + dp(85.25f)
          val centerY = greeterTopMargin + dp(35.625f)
          textPaint.typeface = mono
@@ -168,7 +214,7 @@ index 838c566..22f9be0 100644
          textPaint.clearShadowLayer()
          textPaint.textSize = dp(12f)
          canvas.drawText("PermawebOS", labelX, centerY - dp(1.5f), textPaint)
-@@ -631,8 +642,8 @@ private class OrnamentView(
+@@ -631,8 +647,8 @@ private class OrnamentView(
          if (phoneRows.isEmpty()) updatePhoneFrame(force = true)
          phonePaint.typeface = mono
          phonePaint.textSize = phoneTextSize
@@ -179,7 +225,7 @@ index 838c566..22f9be0 100644
          val saved = canvas.save()
          canvas.clipRect(0f, phoneTop, width.toFloat(), height.toFloat())
          for ((index, text) in phoneRows.withIndex()) {
-@@ -713,12 +724,12 @@ private class OrnamentView(
+@@ -713,12 +729,12 @@ private class OrnamentView(
          val qrY = height - qrSize - dp(160f)
  
          rectPaint.style = Paint.Style.FILL
@@ -194,7 +240,7 @@ index 838c566..22f9be0 100644
          for (r in 0 until moduleCount) {
              for (c in 0 until moduleCount) {
                  if (cachedQrRows[r][c]) {
-@@ -733,13 +744,21 @@ private class OrnamentView(
+@@ -733,13 +749,21 @@ private class OrnamentView(
          val labelY = qrY - dp(30f)
          accentPaint.typeface = mono
          accentPaint.textSize = dp(10f)
@@ -219,7 +265,7 @@ index 838c566..22f9be0 100644
          rectPaint.color = BACKGROUND
          canvas.drawRect(margin - dp(4f), qrY - dp(48f), margin + labelWidth, qrY - dp(4f), rectPaint)
          canvas.drawText(fitToWidth(status.label, accentPaint, labelWidth), margin, labelY, accentPaint)
-@@ -940,8 +959,10 @@ private class OrnamentView(
+@@ -940,8 +964,10 @@ private class OrnamentView(
      private fun dp(value: Float): Float = value * resources.displayMetrics.density
  
      companion object {

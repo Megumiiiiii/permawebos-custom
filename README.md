@@ -1,7 +1,7 @@
 # permawebos-custom
 
 Personal build of the **PermawebOS node APK** (AndEE — Android Execution Environment for
-[PermawebOS](https://github.com/permaweb/os)) with three changes on top of upstream `main`
+[PermawebOS](https://github.com/permaweb/os)) with four changes on top of upstream `main`
 (`2d1715c5`, 2026-11-01):
 
 1. **Node discovery no longer dead-ends when the tunnel is broken.** The screen used to sit on
@@ -9,9 +9,30 @@ Personal build of the **PermawebOS node APK** (AndEE — Android Execution Envir
    on `127.0.0.1:8734`. It now falls back to the LAN origin (`http://<phone-ip>:8734`) so the QR code
    and “copy URL” keep working, and the status strip names the stage that failed.
 2. **Rose theme** (Tailwind pink, matched to megumii.xyz) instead of the navy/cyan ornament.
-3. **`versionName = custom`**, `versionCode = 2` — the screen reads `VERSION custom`.
+3. **`versionName = custom`**, `versionCode = 3` — the screen reads `VERSION custom`.
+4. **Node wallet** — AR balance of the node identity, a signed transfer to any wallet, and a
+   bundler-beneficiary switch staged for the next boot.
 
 Download the APK from [Releases](../../releases). Nothing here is upstream-supported.
+
+## Node wallet
+
+The wallet button next to the gear opens `NodeWalletActivity`:
+
+- **Balance** — `GET /wallet/<node address>/balance` from `https://arweave.net`.
+- **Send AR** — recipient + amount, then a confirmation dialog that shows recipient and network fee
+  *before* anything is signed. The transfer is signed with the app-private HyperBEAM key
+  (`noBackupFilesDir/node-identity/hyperbeam-key.json`) and posted to `POST /tx`.
+- **Bundler beneficiary** — stages `{"bundler-beneficiary": "<address>"}` as a next-boot overlay via
+  `AndeeBootConfigStore`, so bundling income settles to your wallet instead of the node address.
+  Takes effect on the next boot: tap **APPLY & CLOSE** on the node screen.
+
+Signing is the risky part, so it is pinned to the network format and tested against a **mined**
+transaction: `ArweaveTx` builds the v2 signing data (SHA-384 deep hash over
+`format, owner, target, quantity, reward, last_tx, tags, data_size, data_root`, with the numeric
+fields signed as their decimal strings) and signs it with RSASSA-PSS/SHA-256 and a 32-byte salt.
+`ArweaveTxTest` replays a real mainnet transfer — the deep hash matches byte-for-byte and the
+recorded signature verifies against the recorded owner, so the wire format is proven, not assumed.
 
 ## Status labels
 
@@ -51,7 +72,7 @@ The logo bitmap is recoloured with a `PorterDuffColorFilter`, so no new art asse
   the node's app-private state (config, node key). Re-apply a setup code afterwards (extension →
   node setup → QR, or import `next.json`).
 - Build type is `debug`, so Play Protect may warn about an unknown app; allow the install.
-- After installing, `CONFIGURE` → scan the setup QR again, then reopen the app.
+- Upgrading **this** build keeps data: same certificate, only `versionCode` moves up.
 
 ## Rebuilding
 
@@ -61,22 +82,21 @@ release APK** and only the app layer is rebuilt with Gradle:
 
 ```bash
 git clone https://github.com/permaweb/os && cd os
-git apply /path/to/permawebos-custom/patches/*.patch
-
-# Android SDK (platform 36, build-tools 36) + JDK 21, then:
-python3 scripts/stage-official-runtime.py . PermawebOS-Node-0.11-81cba3e7.apk
 ANDROID_SDK_ROOT=/opt/android-sdk JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
-  make -C arch/android apk
+  ./scripts/build.sh . PermawebOS-Node-0.11-81cba3e7.apk
 ```
+
+`build.sh` applies `patches/*.patch`, stages the official runtime, runs
+`:app:testDebugUnitTest`, then `make -C arch/android apk` (`assembleDebug` +
+`verify-generic-andee-artifact.py`).
 
 `stage-official-runtime.py` verifies the official APK digest
 (`4eafb17e2fcca3c96ae33db69433057c432f4ba0baaad9a402d684221dee196c`), then copies
 `assets/andee-runtime.zip`, `lib/{arm64-v8a,x86_64}/*.so` and the llama.cpp notice into the paths
-the repo's own `verifyGeneratedRuntime` contract demands. `make apk` runs `assembleDebug` plus
-`verify-generic-andee-artifact.py`.
+the repo's own `verifyGeneratedRuntime` contract demands.
 
-Unit tests: `cd arch/android/android && ./gradlew :app:testDebugUnitTest` (62 tests, including the
-new tunnel-fallback contract; upstream’s “never advertise LAN” tests are intentionally replaced).
+68 unit tests run, 6 of them proving the Arweave transfer format against a mined transaction.
+Upstream’s “never advertise LAN” tests are intentionally replaced by the LAN-fallback contract.
 
 ## Provenance and licence
 
