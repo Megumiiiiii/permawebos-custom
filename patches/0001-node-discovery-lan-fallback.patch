@@ -1,0 +1,257 @@
+diff --git a/arch/android/android/app/src/main/java/org/permaweb/andee/NodeDiscovery.kt b/arch/android/android/app/src/main/java/org/permaweb/andee/NodeDiscovery.kt
+index 0432071..8531606 100644
+--- a/arch/android/android/app/src/main/java/org/permaweb/andee/NodeDiscovery.kt
++++ b/arch/android/android/app/src/main/java/org/permaweb/andee/NodeDiscovery.kt
+@@ -1,5 +1,6 @@
+ package org.permaweb.andee
+ 
++import java.net.InetAddress
+ import java.net.URI
+ 
+ internal data class NodeStatus(
+@@ -24,6 +25,7 @@ internal data class NodeMetadata(
+ internal object NodeDiscovery {
+     const val INFO = "/~meta@1.0/info"
+     private val addressPattern = Regex("[A-Za-z0-9_-]{43}")
++    private val committerPattern = Regex("uri-did-ar-[a-z0-9-]{52}")
+ 
+     fun origin(value: String): String? = try {
+         val uri = URI(value)
+@@ -36,7 +38,7 @@ internal object NodeDiscovery {
+ 
+     private fun tunnelOrigin(committer: String?, peer: String): String? {
+         // meta already reports HyperBEAM's DNS-safe committer. Do not re-encode identity.
+-        if (committer == null || !Regex("uri-did-ar-[a-z0-9-]{52}").matches(committer)) return null
++        if (committer == null || !committerPattern.matches(committer)) return null
+         val provider = origin(peer)?.let(::URI) ?: return null
+         if (!provider.host.contains('.') || provider.host.contains(':') ||
+             provider.host.split('.').any { !Regex("[a-z0-9](?:[a-z0-9-]*[a-z0-9])?").matches(it) } ||
+@@ -45,21 +47,60 @@ internal object NodeDiscovery {
+         return origin("${provider.scheme}://$committer.${provider.rawAuthority}")
+     }
+ 
+-    fun snapshot(ip: String?, read: (String) -> NodeMetadata?): NodeStatus {
++    private fun resolves(host: String): Boolean = try {
++        InetAddress.getByName(host)
++        true
++    } catch (_: Exception) {
++        false
++    }
++
++    /**
++     * Which part of the tunnel path failed, in the shortest form that fits the ornament strip.
++     * A configured tunnel that cannot carry traffic leaves the node reachable on the LAN only,
++     * so it is reported instead of blocking the screen on an unusable public URL.
++     */
++    private fun tunnelDiagnosis(
++        local: NodeMetadata,
++        peer: String?,
++        publicOrigin: String?,
++        remote: NodeMetadata?,
++        resolves: (String) -> Boolean,
++    ): String {
++        // An explicit location-url is reported by the node itself; only the derived
++        // <committer>.<peer> form depends on the committer and peer config.
++        if (local.locationUrl == null) {
++            if (local.committer.isNullOrEmpty() || !committerPattern.matches(local.committer)) return "TUNNEL ID"
++            if (peer.isNullOrEmpty()) return "TUNNEL CONFIG"
++        }
++        if (publicOrigin == null) return "TUNNEL URL"
++        if (remote != null && remote.address.isNotEmpty()) return "OTHER NODE"
++        val host = try { URI(publicOrigin).host } catch (_: Exception) { null }
++        return if (host != null && !resolves(host)) "TUNNEL DNS" else "TUNNEL DOWN"
++    }
++
++    fun snapshot(
++        ip: String?,
++        read: (String) -> NodeMetadata?,
++        resolves: (String) -> Boolean = ::resolves,
++    ): NodeStatus {
+         val local = read("http://127.0.0.1:8734$INFO") ?: return NodeStatus.booting()
+         if (!addressPattern.matches(local.address)) return NodeStatus.booting()
+-        val configured = local.locationUrl ?: local.tunnelPeer?.let {
+-            tunnelOrigin(local.committer, it) ?: ""
++        val peer = local.tunnelPeer
++        val configured: String? = local.locationUrl
++            ?: peer?.let { tunnelOrigin(local.committer, it) }
++            ?: if (peer == null) null else ""
++        if (configured == null) {
++            return if (ip == null) NodeStatus(false, null, "", "NETWORK UNAVAILABLE")
++            else NodeStatus(true, ip, "http://$ip:8734", "LOCAL NETWORK NODE")
+         }
+-        if (configured != null) {
+-            val unavailable = NodeStatus(false, ip, "", "TUNNEL UNAVAILABLE")
+-            val publicOrigin = origin(configured) ?: return unavailable
+-            val remote = read(publicOrigin + INFO) ?: return unavailable
+-            // A reachable gateway alone is insufficient: it must reach this node.
+-            if (remote.address != local.address) return unavailable
++        val publicOrigin = origin(configured)
++        val remote = publicOrigin?.let { read(it + INFO) }
++        // A reachable gateway alone is insufficient: it must reach this node.
++        if (publicOrigin != null && remote?.address == local.address) {
+             return NodeStatus(true, ip, publicOrigin, "CONNECT YOUR NODE")
+         }
+-        return if (ip == null) NodeStatus(false, null, "", "NETWORK UNAVAILABLE")
+-        else NodeStatus(true, ip, "http://$ip:8734", "LOCAL NETWORK NODE")
++        val diagnosis = tunnelDiagnosis(local, peer, publicOrigin, remote, resolves)
++        return if (ip == null) NodeStatus(false, null, "", diagnosis)
++        else NodeStatus(true, ip, "http://$ip:8734", "LAN NODE · $diagnosis")
+     }
+ }
+diff --git a/arch/android/android/app/src/test/java/org/permaweb/andee/NodeDiscoveryTest.kt b/arch/android/android/app/src/test/java/org/permaweb/andee/NodeDiscoveryTest.kt
+index 34d7828..34b2e85 100644
+--- a/arch/android/android/app/src/test/java/org/permaweb/andee/NodeDiscoveryTest.kt
++++ b/arch/android/android/app/src/test/java/org/permaweb/andee/NodeDiscoveryTest.kt
+@@ -7,43 +7,66 @@ import org.junit.Test
+ 
+ class NodeDiscoveryTest {
+     private val address = "A".repeat(43)
+-    private val origin = "https://${"a".repeat(52)}.smoke.solutions"
++    private val origin = "https://" + "a".repeat(52) + ".smoke.solutions"
++    private val lan = "http://192.168.1.2:8734"
++    private val noDns: (String) -> Boolean = { false }
++    private val dnsOk: (String) -> Boolean = { true }
++    private val label = "uri-did-ar-" + "a".repeat(52)
+ 
+     @Test fun startupTunnelUsesReportedCommitterAndVerifiesTheNode() {
+-        val label = "uri-did-ar-${"a".repeat(52)}"
+         val root = "https://$label.smoke.solutions"
+         val calls = mutableListOf<String>()
+-        val status = NodeDiscovery.snapshot("192.168.1.2") { url ->
++        val status = NodeDiscovery.snapshot("192.168.1.2", { url ->
+             calls.add(url)
+             if (url.startsWith("http://127.")) NodeMetadata(address, null, label, "https://smoke.solutions")
+             else NodeMetadata(address, null)
+-        }
++        }, dnsOk)
+         assertEquals(root, status.url)
+         assertEquals("CONNECT YOUR NODE", status.label)
+         assertEquals(listOf("http://127.0.0.1:8734${NodeDiscovery.INFO}", root + NodeDiscovery.INFO), calls)
+     }
+ 
+-    @Test fun invalidOrUnavailableStartupTunnelNeverAdvertisesLan() {
+-        val label = "uri-did-ar-${"a".repeat(52)}"
+-        for ((committer, peer) in listOf(
+-            null to "https://smoke.solutions",
+-            "not-a-committer" to "https://smoke.solutions",
+-            label to "https://user:pass@smoke.solutions",
+-            label to "https://smoke.solutions/path",
+-            label to "https://127.0.0.1",
+-            label to "https://smoke.solutions",
++    @Test fun brokenStartupTunnelServesTheLanNodeWithADiagnosis() {
++        for ((committer, peer, expected) in listOf(
++            Triple(null, "https://smoke.solutions", "TUNNEL ID"),
++            Triple("not-a-committer", "https://smoke.solutions", "TUNNEL ID"),
++            Triple(label, "https://user:pass@smoke.solutions", "TUNNEL URL"),
++            Triple(label, "https://smoke.solutions/path", "TUNNEL URL"),
++            Triple(label, "https://127.0.0.1", "TUNNEL URL"),
++            Triple(label, "", "TUNNEL CONFIG"),
++            Triple(label, "https://smoke.solutions", "TUNNEL DNS"),
+         )) {
+-            val status = NodeDiscovery.snapshot("192.168.1.2") { url ->
++            val status = NodeDiscovery.snapshot("192.168.1.2", { url ->
+                 if (url.startsWith("http://127.")) NodeMetadata(address, null, committer, peer) else null
+-            }
+-            assertEquals("TUNNEL UNAVAILABLE", status.label)
+-            assertEquals("", status.url)
++            }, noDns)
++            assertTrue("$committer/$peer should stay usable over the LAN", status.ready)
++            assertEquals(lan, status.url)
++            assertEquals("LAN NODE · $expected", status.label)
+         }
+-        val wrongNode = NodeDiscovery.snapshot(null) { url ->
++        // DNS resolves but nothing answers the tunnel host.
++        val unreachable = NodeDiscovery.snapshot("192.168.1.2", { url ->
++            if (url.startsWith("http://127.")) NodeMetadata(address, null, label, "https://smoke.solutions")
++            else null
++        }, dnsOk)
++        assertEquals("LAN NODE · TUNNEL DOWN", unreachable.label)
++        assertEquals(lan, unreachable.url)
++        // The gateway answers, but for a different node.
++        val wrongNode = NodeDiscovery.snapshot("192.168.1.2", { url ->
+             if (url.startsWith("http://127.")) NodeMetadata(address, null, label, "https://smoke.solutions")
+             else NodeMetadata("B".repeat(43), null)
+-        }
+-        assertEquals("TUNNEL UNAVAILABLE", wrongNode.label)
++        }, dnsOk)
++        assertEquals("LAN NODE · OTHER NODE", wrongNode.label)
++        assertEquals(lan, wrongNode.url)
++    }
++
++    @Test fun brokenTunnelWithoutLanStaysNotReadyButSaysWhy() {
++        val status = NodeDiscovery.snapshot(null, { url ->
++            if (url.startsWith("http://127.")) NodeMetadata(address, null, label, "https://smoke.solutions")
++            else null
++        }, noDns)
++        assertFalse(status.ready)
++        assertEquals("", status.url)
++        assertEquals("TUNNEL DNS", status.label)
+     }
+ 
+     @Test fun bareTunnelRootRoundTripsWithoutSubstitution() {
+@@ -60,40 +83,32 @@ class NodeDiscoveryTest {
+ 
+     @Test fun onlyMatchingReachableNodeProducesTunnelQr() {
+         val calls = mutableListOf<String>()
+-        val status = NodeDiscovery.snapshot("192.168.1.2") { url ->
++        val status = NodeDiscovery.snapshot("192.168.1.2", { url ->
+             calls.add(url)
+             NodeMetadata(address, origin)
+-        }
++        }, dnsOk)
+         assertTrue(status.ready)
+         assertEquals(origin, status.url)
+         assertEquals(listOf("http://127.0.0.1:8734${NodeDiscovery.INFO}", origin + NodeDiscovery.INFO), calls)
+     }
+ 
+-    @Test fun unreachableOrWrongTunnelDoesNotFallBackToLan() {
+-        for (remote in listOf(null, NodeMetadata("B".repeat(43), origin))) {
+-            val status = NodeDiscovery.snapshot("192.168.1.2") { url ->
+-                if (url.startsWith("http://127.")) NodeMetadata(address, origin) else remote
+-            }
+-            assertFalse(status.ready)
+-            assertEquals("", status.url)
+-            assertEquals("TUNNEL UNAVAILABLE", status.label)
+-        }
+-    }
+-
+     @Test fun changedConfigurationIsReadOnEverySnapshot() {
+         for (host in listOf(origin, "https://next.smoke.solutions")) {
+-            val status = NodeDiscovery.snapshot(null) { NodeMetadata(address, host) }
++            val status = NodeDiscovery.snapshot(null, { NodeMetadata(address, host) }, dnsOk)
+             assertEquals(host, status.url)
+         }
+     }
+ 
+     @Test fun startingAndLocalOnlyStatesStayDistinct() {
+-        assertEquals(NodeStatus.booting(), NodeDiscovery.snapshot(null) { null })
+-        assertEquals("NETWORK UNAVAILABLE", NodeDiscovery.snapshot(null) { NodeMetadata(address, null) }.label)
+-        val local = NodeDiscovery.snapshot("192.168.1.2") { NodeMetadata(address, null) }
++        assertEquals(NodeStatus.booting(), NodeDiscovery.snapshot(null, { null }))
++        assertEquals(
++            "NETWORK UNAVAILABLE",
++            NodeDiscovery.snapshot(null, { NodeMetadata(address, null) }).label,
++        )
++        val local = NodeDiscovery.snapshot("192.168.1.2", { NodeMetadata(address, null) })
+         assertTrue(local.ready)
+         assertEquals("LOCAL NETWORK NODE", local.label)
+-        assertEquals("http://192.168.1.2:8734", local.url)
++        assertEquals(lan, local.url)
+         assertFalse(DiscoveryQr.rowsFor("").any { it.any { cell -> cell } })
+     }
+ 
+@@ -102,9 +117,11 @@ class NodeDiscoveryTest {
+             "https://example.com/#secret", "https://example.com/path", "file:///etc/passwd",
+             "https://**[base32 encoded node address]**.smoke.solutions")) {
+             assertNull(NodeDiscovery.origin(value))
+-            val status = NodeDiscovery.snapshot("192.168.1.2") { NodeMetadata(address, value) }
+-            assertFalse(status.ready)
+-            assertEquals("", status.url)
++            val status = NodeDiscovery.snapshot("192.168.1.2", { NodeMetadata(address, value) }, dnsOk)
++            // Never echoed as a payload; the LAN origin is what the scan can carry.
++            assertNotEquals(value, status.url)
++            assertEquals("LAN NODE · TUNNEL URL", status.label)
++            assertEquals(lan, status.url)
+         }
+     }
+ }

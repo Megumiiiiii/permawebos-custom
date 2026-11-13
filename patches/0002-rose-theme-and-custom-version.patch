@@ -1,0 +1,346 @@
+diff --git a/arch/android/android/app/build.gradle.kts b/arch/android/android/app/build.gradle.kts
+index 842f11f..9ae6d17 100644
+--- a/arch/android/android/app/build.gradle.kts
++++ b/arch/android/android/app/build.gradle.kts
+@@ -10,8 +10,8 @@ android {
+         applicationId = "org.permaweb.andee"
+         minSdk = 29
+         targetSdk = 36
+-        versionCode = 1
+-        versionName = "0.11"
++        versionCode = 2
++        versionName = "custom"
+         val configuratorUrl = providers.gradleProperty("andeeConfiguratorUrl")
+             .getOrElse("https://bundler.mystical.computer/GKWEPkK-GUJYx3JTAJ-aCR6ZgshVW9naSueDZOeiXhc~manifest@1.0/")
+         require(!configuratorUrl.contains('"') && !configuratorUrl.contains('\\') && !configuratorUrl.contains('\n'))
+diff --git a/arch/android/android/app/src/main/java/org/permaweb/andee/AndeePalette.kt b/arch/android/android/app/src/main/java/org/permaweb/andee/AndeePalette.kt
+new file mode 100644
+index 0000000..fdb9b90
+--- /dev/null
++++ b/arch/android/android/app/src/main/java/org/permaweb/andee/AndeePalette.kt
+@@ -0,0 +1,44 @@
++package org.permaweb.andee
++
++import android.graphics.Color
++
++/**
++ * Rose palette tuned to megumii.xyz (Tailwind pink + purple on a near-black plum).
++ *
++ * The ornament, setup scanner and review screens are all monospace ASCII art, so the
++ * whole look is driven from these few values instead of per-view resources.
++ */
++internal object AndeePalette {
++    /** Page background: near-black plum. */
++    val background = Color.rgb(21, 7, 16)
++
++    /** Deeper shade for wells, secondary buttons and text on accent fills. */
++    val backgroundDeep = Color.rgb(12, 3, 8)
++
++    /** Primary type: pink-100. */
++    val ink = Color.rgb(252, 231, 243)
++
++    /** Primary type with the alpha the original white ink used. */
++    val inkStrong = Color.argb(240, 252, 231, 243)
++
++    /** Secondary type. */
++    val inkMuted = Color.argb(170, 252, 231, 243)
++
++    /** Strong line-work and progress fills: pink-500. */
++    val accent = Color.rgb(236, 72, 153)
++
++    /** Glow/accent type: pink-400. */
++    val accentBright = Color.rgb(244, 114, 182)
++
++    /** Shadow glow behind the ASCII tunnel: pink-600. */
++    val glow = Color.rgb(219, 39, 119)
++
++    /** Deep pink for panel fills (adaptive icon background, rails). */
++    val panel = Color.rgb(131, 24, 67)
++
++    /** Dark modules inside the QR symbol; stays high-contrast on [ink]. */
++    val qrInk = Color.rgb(26, 7, 18)
++
++    /** Destructive/pending state fill. */
++    val warning = Color.rgb(164, 76, 0)
++}
+diff --git a/arch/android/android/app/src/main/java/org/permaweb/andee/OrnamentActivity.kt b/arch/android/android/app/src/main/java/org/permaweb/andee/OrnamentActivity.kt
+index 838c566..22f9be0 100644
+--- a/arch/android/android/app/src/main/java/org/permaweb/andee/OrnamentActivity.kt
++++ b/arch/android/android/app/src/main/java/org/permaweb/andee/OrnamentActivity.kt
+@@ -15,6 +15,8 @@ import android.graphics.BitmapFactory
+ import android.graphics.Canvas
+ import android.graphics.Color
+ import android.graphics.Paint
++import android.graphics.PorterDuff
++import android.graphics.PorterDuffColorFilter
+ import android.graphics.Rect
+ import android.graphics.RectF
+ import android.graphics.Typeface
+@@ -283,7 +285,10 @@ private class OrnamentView(
+ 
+     private val mono = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
+     private val splashMark by lazy { BitmapFactory.decodeResource(resources, R.drawable.os_splash_mark) }
+-    private val splashMarkPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
++    private val splashMarkPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
++        // Recolour the monochrome mark instead of shipping new bitmaps per theme.
++        colorFilter = PorterDuffColorFilter(AndeePalette.accentBright, PorterDuff.Mode.SRC_IN)
++    }
+     private val nodeStatus = AtomicReference(NodeStatus.booting())
+     private val nextBootConfigPending = AtomicBoolean(AndeeBootConfigStore.hasPending(context))
+     private val presentationActive = AtomicBoolean(false)
+@@ -317,17 +322,17 @@ private class OrnamentView(
+     private val qrDrawBounds = RectF()
+ 
+     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+-        color = Color.WHITE
++        color = AndeePalette.ink
+         typeface = mono
+         isSubpixelText = true
+     }
+     private val phonePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+-        color = Color.WHITE
++        color = AndeePalette.ink
+         typeface = mono
+         isSubpixelText = true
+     }
+     private val accentPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+-        color = Color.rgb(91, 238, 255)
++        color = AndeePalette.accentBright
+         typeface = mono
+         isSubpixelText = true
+     }
+@@ -360,7 +365,7 @@ private class OrnamentView(
+     }.apply {
+         visibility = View.INVISIBLE
+         scaleType = ImageView.ScaleType.FIT_CENTER
+-        background = RippleDrawable(ColorStateList.valueOf(0x33FFFFFF), null, ColorDrawable(Color.WHITE))
++        background = RippleDrawable(ColorStateList.valueOf(PINK_RIPPLE), null, ColorDrawable(Color.WHITE))
+     }
+     private val controls = LinearLayout(context).apply {
+         orientation = LinearLayout.HORIZONTAL
+@@ -382,7 +387,7 @@ private class OrnamentView(
+ 
+     private fun iconButton(icon: Int, label: String, action: () -> Unit) = ImageButton(context).apply {
+         setImageResource(icon)
+-        imageTintList = ColorStateList.valueOf(Color.WHITE)
++        imageTintList = ColorStateList.valueOf(AndeePalette.ink)
+         setPadding(dp(13f).toInt(), dp(13f).toInt(), dp(13f).toInt(), dp(13f).toInt())
+         background = controlBackground(primary = false)
+         contentDescription = label
+@@ -393,20 +398,26 @@ private class OrnamentView(
+     private fun controlBackground(primary: Boolean, pending: Boolean = false): RippleDrawable {
+         val shape = GradientDrawable().apply {
+             cornerRadius = 0f
+-            setColor(if (pending) TERMINATE_ORANGE else if (primary) Color.WHITE else BACKGROUND)
+-            if (!primary) setStroke(dp(1f).toInt().coerceAtLeast(1), Color.argb(110, 255, 255, 255))
++            setColor(
++                when {
++                    pending -> TERMINATE_ORANGE
++                    primary -> AndeePalette.accent
++                    else -> AndeePalette.backgroundDeep
++                },
++            )
++            if (!primary) setStroke(dp(1f).toInt().coerceAtLeast(1), PINK_STROKE)
+         }
+-        return RippleDrawable(ColorStateList.valueOf(if (primary) 0x22000000 else 0x33FFFFFF), shape, null)
++        return RippleDrawable(ColorStateList.valueOf(if (primary) 0x33000000 else PINK_RIPPLE), shape, null)
+     }
+ 
+     private fun updateControls() {
+         val pending = nextBootConfigPending.get()
+         setupButton.text = if (pending) "APPLY & CLOSE" else "CONFIGURE"
+         setupButton.contentDescription = if (pending) "Apply configuration and close node" else "Configure by scanning a setup code"
+-        setupButton.setTextColor(if (pending) Color.WHITE else BACKGROUND)
++        setupButton.setTextColor(if (pending) AndeePalette.ink else AndeePalette.backgroundDeep)
+         setupButton.background = controlBackground(primary = true, pending = pending)
+         val icon = if (pending) null else context.getDrawable(R.drawable.ic_setup_scan)?.mutate()?.apply {
+-            setTint(BACKGROUND)
++            setTint(AndeePalette.backgroundDeep)
+             setBounds(0, 0, dp(16f).toInt(), dp(16f).toInt())
+         }
+         setupButton.setCompoundDrawablesRelative(icon, null, null, null)
+@@ -619,7 +630,7 @@ private class OrnamentView(
+         val labelX = greeterMargin + dp(85.25f)
+         val centerY = greeterTopMargin + dp(35.625f)
+         textPaint.typeface = mono
+-        textPaint.color = Color.WHITE
++        textPaint.color = AndeePalette.ink
+         textPaint.clearShadowLayer()
+         textPaint.textSize = dp(12f)
+         canvas.drawText("PermawebOS", labelX, centerY - dp(1.5f), textPaint)
+@@ -631,8 +642,8 @@ private class OrnamentView(
+         if (phoneRows.isEmpty()) updatePhoneFrame(force = true)
+         phonePaint.typeface = mono
+         phonePaint.textSize = phoneTextSize
+-        phonePaint.color = Color.WHITE
+-        phonePaint.setShadowLayer(dp(11f), 0f, 0f, Color.rgb(85, 229, 255))
++        phonePaint.color = AndeePalette.ink
++        phonePaint.setShadowLayer(dp(11f), 0f, 0f, AndeePalette.glow)
+         val saved = canvas.save()
+         canvas.clipRect(0f, phoneTop, width.toFloat(), height.toFloat())
+         for ((index, text) in phoneRows.withIndex()) {
+@@ -713,12 +724,12 @@ private class OrnamentView(
+         val qrY = height - qrSize - dp(160f)
+ 
+         rectPaint.style = Paint.Style.FILL
+-        rectPaint.color = Color.WHITE
++        rectPaint.color = AndeePalette.ink
+         rectPaint.alpha = if (status.ready) 255 else 188
+         canvas.drawRect(qrX, qrY, qrX + qrSize, qrY + qrSize, rectPaint)
+ 
+         rectPaint.alpha = 255
+-        rectPaint.color = Color.rgb(1, 10, 29)
++        rectPaint.color = AndeePalette.qrInk
+         for (r in 0 until moduleCount) {
+             for (c in 0 until moduleCount) {
+                 if (cachedQrRows[r][c]) {
+@@ -733,13 +744,21 @@ private class OrnamentView(
+         val labelY = qrY - dp(30f)
+         accentPaint.typeface = mono
+         accentPaint.textSize = dp(10f)
+-        accentPaint.color = Color.WHITE
++        accentPaint.color = AndeePalette.accentBright
+         textPaint.typeface = mono
+         textPaint.textSize = dp(9f)
+-        textPaint.color = Color.argb(225, 238, 251, 255)
++        textPaint.color = Color.argb(225, 252, 231, 243)
+         textPaint.clearShadowLayer()
+         val urlWidth = if (status.ready) labelWidth - dp(15f) else labelWidth
+-        val url = fitToWidth(if (status.ready) status.url else "Finding your node…", textPaint, urlWidth)
++        val url = fitToWidth(
++            when {
++                status.ready -> status.url
++                status.label == "NODE STARTING" -> "Finding your node…"
++                else -> "No node URL reachable"
++            },
++            textPaint,
++            urlWidth,
++        )
+         rectPaint.color = BACKGROUND
+         canvas.drawRect(margin - dp(4f), qrY - dp(48f), margin + labelWidth, qrY - dp(4f), rectPaint)
+         canvas.drawText(fitToWidth(status.label, accentPaint, labelWidth), margin, labelY, accentPaint)
+@@ -940,8 +959,10 @@ private class OrnamentView(
+     private fun dp(value: Float): Float = value * resources.displayMetrics.density
+ 
+     companion object {
+-        private val BACKGROUND = Color.rgb(3, 14, 46)
+-        private val TERMINATE_ORANGE = Color.rgb(164, 76, 0)
++        private val BACKGROUND = AndeePalette.background
++        private val TERMINATE_ORANGE = AndeePalette.warning
++        private const val PINK_RIPPLE = 0x55EC4899
++        private const val PINK_STROKE = 0x6EF472B6
+         private const val ANIMATION_FRAME_MS = 100L
+         private const val BOOT_POLL_MS = 1_000L
+         private const val STEADY_POLL_MS = 5_000L
+diff --git a/arch/android/android/app/src/main/java/org/permaweb/andee/SetupImportActivity.kt b/arch/android/android/app/src/main/java/org/permaweb/andee/SetupImportActivity.kt
+index f37a8fa..9058eb2 100644
+--- a/arch/android/android/app/src/main/java/org/permaweb/andee/SetupImportActivity.kt
++++ b/arch/android/android/app/src/main/java/org/permaweb/andee/SetupImportActivity.kt
+@@ -486,7 +486,7 @@ private class SetupOverlay(context: android.content.Context, private val actions
+ 
+     private fun title(canvas: Canvas, line: String, sub: String, m: Float, top: Float) {
+         text.textSize = dp(17f); text.color = INK
+-        text.setShadowLayer(dp(9f), 0f, 0f, CYAN)
++        text.setShadowLayer(dp(9f), 0f, 0f, ACCENT)
+         canvas.drawText(line, m, top, text)
+         text.clearShadowLayer()
+         text.textSize = dp(11.5f); text.color = MUTED
+@@ -506,9 +506,9 @@ private class SetupOverlay(context: android.content.Context, private val actions
+         val left = (w - side) / 2f
+         val top = dp(128f) + (bottomTop - dp(138f) - side) / 2f
+         val arm = side * .14f
+-        stroke.color = if (System.currentTimeMillis() < flashUntil) Color.WHITE else CYAN
++        stroke.color = if (System.currentTimeMillis() < flashUntil) Color.WHITE else ACCENT
+         stroke.strokeWidth = dp(3f)
+-        stroke.setShadowLayer(dp(6f), 0f, 0f, CYAN)
++        stroke.setShadowLayer(dp(6f), 0f, 0f, ACCENT)
+         for ((x, y, dx, dy) in listOf(
+             listOf(left, top, 1f, 1f), listOf(left + side, top, -1f, 1f),
+             listOf(left, top + side, 1f, -1f), listOf(left + side, top + side, -1f, -1f),
+@@ -530,18 +530,18 @@ private class SetupOverlay(context: android.content.Context, private val actions
+             for (i in 0 until expected) {
+                 val x = m + i * (boxW + gap)
+                 if (i in got) {
+-                    fill.color = CYAN
++                    fill.color = ACCENT
+                     canvas.drawRect(x, y, x + boxW, y + dp(18f), fill)
+                 } else {
+-                    stroke.color = Color.argb(115, 238, 251, 255); stroke.strokeWidth = dp(1f)
++                    stroke.color = Color.argb(115, 252, 231, 243); stroke.strokeWidth = dp(1f)
+                     canvas.drawRect(x, y, x + boxW, y + dp(18f), stroke)
+                 }
+             }
+         }
+         y += dp(30f)
+-        fill.color = Color.argb(40, 238, 251, 255)
++        fill.color = Color.argb(40, 244, 114, 182)
+         canvas.drawRect(m, y, w - m, y + dp(6f), fill)
+-        fill.color = CYAN
++        fill.color = ACCENT
+         canvas.drawRect(m, y, m + (w - 2 * m) * percent / 100f, y + dp(6f), fill)
+         y += dp(24f)
+         text.color = INK; text.textSize = dp(11.5f)
+@@ -556,7 +556,7 @@ private class SetupOverlay(context: android.content.Context, private val actions
+ 
+     private fun drawReview(canvas: Canvas, w: Float, h: Float, m: Float) {
+         canvas.drawColor(BACKGROUND)
+-        text.textSize = dp(11f); text.color = CYAN
++        text.textSize = dp(11f); text.color = ACCENT
+         canvas.drawText("PermawebOS", m, dp(44f), text)
+         text.textSize = dp(21f); text.color = INK
+         canvas.drawText("Review your node", m, dp(77f), text)
+@@ -571,7 +571,7 @@ private class SetupOverlay(context: android.content.Context, private val actions
+                 canvas.drawText(line, m, y, text)
+             }
+             y += rowGap * .4f
+-            stroke.color = Color.argb(35, 238, 251, 255); stroke.strokeWidth = dp(1f)
++            stroke.color = Color.argb(35, 252, 231, 243); stroke.strokeWidth = dp(1f)
+             canvas.drawLine(m, y, w - m, y, stroke)
+             y += rowGap * .6f
+         }
+@@ -601,7 +601,7 @@ private class SetupOverlay(context: android.content.Context, private val actions
+         bounds.set(x, y, x + width, y + dp(48f))
+         if (filled) {
+             fill.color = Color.WHITE
+-            if (glow) fill.setShadowLayer(dp(12f), 0f, 0f, CYAN)
++            if (glow) fill.setShadowLayer(dp(12f), 0f, 0f, ACCENT)
+             canvas.drawRect(bounds, fill)
+             fill.clearShadowLayer()
+         } else {
+@@ -661,9 +661,10 @@ private class SetupOverlay(context: android.content.Context, private val actions
+     }
+ 
+     companion object {
+-        val BACKGROUND = Color.rgb(3, 14, 46)
+-        val CYAN = Color.rgb(85, 229, 255)
+-        val INK = Color.argb(240, 238, 251, 255)
+-        val MUTED = Color.argb(170, 238, 251, 255)
++        // Rose theme shared with the ornament screen (see AndeePalette).
++        val BACKGROUND = AndeePalette.background
++        val ACCENT = AndeePalette.accentBright
++        val INK = AndeePalette.inkStrong
++        val MUTED = AndeePalette.inkMuted
+     }
+ }
+diff --git a/arch/android/android/app/src/main/res/values/permawebos_icon_colors.xml b/arch/android/android/app/src/main/res/values/permawebos_icon_colors.xml
+index 89d3926..6450ca5 100644
+--- a/arch/android/android/app/src/main/res/values/permawebos_icon_colors.xml
++++ b/arch/android/android/app/src/main/res/values/permawebos_icon_colors.xml
+@@ -1,4 +1,4 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <resources>
+-    <color name="permawebos_icon_background">#030E2E</color>
++    <color name="permawebos_icon_background">#831843</color>
+ </resources>
+diff --git a/arch/android/android/app/src/main/res/values/styles.xml b/arch/android/android/app/src/main/res/values/styles.xml
+index fe92054..472128c 100644
+--- a/arch/android/android/app/src/main/res/values/styles.xml
++++ b/arch/android/android/app/src/main/res/values/styles.xml
+@@ -4,6 +4,6 @@
+         <item name="android:windowActionBar">false</item>
+         <item name="android:windowFullscreen">true</item>
+         <item name="android:fontFamily">monospace</item>
+-        <item name="android:colorAccent">#FFFFFF</item>
++        <item name="android:colorAccent">#F472B6</item>
+     </style>
+ </resources>
