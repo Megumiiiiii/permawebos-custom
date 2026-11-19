@@ -68,16 +68,22 @@ def patch_background(text: str) -> str:
         'import{prepareCustomProvider as __prepareCustom}from"./custom-provider.js";import{n as e}from"./rolldown-runtime-hePW80VL.js";',
         "background import",
     )
-    start = "n.admin||Z(`unauthorized`,k.admin),[`openrouter`,`openai`,`anthropic`].includes(t.provider)"
-    end = "models:await o(t.provider,l?.[0]?.id)}}}"
-    begin = text.find(start)
-    finish = text.find(end, begin)
-    if begin < 0 or finish < 0 or text.count(start) != 1:
-        raise SystemExit("background save span not found")
-    finish += len(end)
-    replacement = r"""n.admin||Z(`unauthorized`,k.admin);let __custom=t.provider===`custom`?__prepareCustom({baseUrl:t.baseUrl,apiKey:t.apiKey,model:Array.isArray(t.models)?t.models[0]:``,format:t.format}):null;if(!__custom&&![`openrouter`,`openai`,`anthropic`].includes(t.provider))Z(`invalid-input`,k.invalid);let r=__custom?{label:__custom.name,baseUrl:__custom.baseUrl}:Cn[t.provider],c=(__custom?__custom.apiKey:t.apiKey).trim();(!c||c.length>8192||/\s/.test(c))&&Z(`invalid-input`,k.key);let l;try{l=__custom?[{id:__custom.model}]:t.models?.length?hn(t.models.join(`
-`)).map(e=>({id:e})):void 0}catch{Z(`invalid-input`,k.invalid)}l&&Nd(l);let u=await ld(JSON.stringify({key:c}),n.publicKey),d={mode:`replace`,envelope:{"encrypted-key":u.encryptedKey,"encrypted-iv":u.encryptedIv,"encrypted-tag":u.encryptedTag,ciphertext:u.ciphertext}},f={id:__custom?__custom.id:t.provider,name:r.label,format:__custom?__custom.format:t.provider,enabled:!0,"base-url":r.baseUrl};if(__custom){f.models=l,f[`default-model`]=l[0].id;let __saved=await s(n,f,d),models;try{models=await o(f.id,l[0].id)}catch(e){if(ue(e)&&[`cancelled`,`unauthorized`].includes(e.code))throw e;models=[{id:`${f.id}/${__custom.model}`,label:__custom.model,providerName:r.label,isRecommended:!0}]}return{inventory:Md(__saved),models}}let p=kd(await i({action:`discover`,revision:n.revision,provider:f,credential:d}));(p.revision!==n.revision||p[`provider-id`]!==t.provider)&&Z(`invalid-response`,k.invalid);let m=Nd(p.models);return m.length||Z(`unavailable`,k.busy,!0),{inventory:Md(await s(n,{...f,models:l?.length?l:m,...l?.length?{"default-model":l[0].id}:{}},d)),models:await o(t.provider,l?.[0]?.id)}}}}"""
-    return text[:begin] + replacement + text[finish:]
+    # Insert a balanced early return. Do not rewrite the original tail: an extra
+    # closing brace there parses in Node and is a SyntaxError in current Chrome.
+    needle = "n.admin||Z(`unauthorized`,k.admin),[`openrouter`,`openai`,`anthropic`].includes(t.provider)"
+    insert = (
+        "if(t.provider===`custom`){let __c=__prepareCustom({baseUrl:t.baseUrl,apiKey:t.apiKey,"
+        "model:Array.isArray(t.models)?t.models[0]:\"\",format:t.format});"
+        "let __f={id:__c.id,name:__c.name,format:__c.format,enabled:!0,\"base-url\":__c.baseUrl,"
+        "models:[{id:__c.model}],\"default-model\":__c.model};"
+        "let __u=await ld(JSON.stringify({key:__c.apiKey}),n.publicKey);"
+        "let __d={mode:`replace`,envelope:{\"encrypted-key\":__u.encryptedKey,"
+        "\"encrypted-iv\":__u.encryptedIv,\"encrypted-tag\":__u.encryptedTag,ciphertext:__u.ciphertext}};"
+        "let __saved=await s(n,__f,__d);"
+        "return{inventory:Md(__saved),models:[{id:__c.id+\"/\"+__c.model,label:__c.model,"
+        "providerName:__c.name,isRecommended:!0}]};}"
+    )
+    return replace_once(text, needle, insert + needle, "background custom branch")
 
 
 def patch_ui(text: str) -> str:
@@ -203,6 +209,15 @@ def main() -> int:
     original = manifest.read_text(encoding="utf-8")
     updated = replace_once(original, '"version": "0.1.3"', '"version": "0.1.4"', "manifest version")
     manifest.write_text(updated, encoding="utf-8")
+    version_files = {
+        "assets/clientCopy-DA2faWDs.js": ("var e=`0.1.3`", "var e=`0.1.4`"),
+        "injected.js": ("n=`0.1.3`", "n=`0.1.4`"),
+        "content.js": ("badge:`v0.1.3`", "badge:`v0.1.4`"),
+    }
+    for name, (old, new) in version_files.items():
+        path = chrome / name
+        path.write_text(replace_once(path.read_text(encoding="utf-8"), old, new, name), encoding="utf-8")
+        print(f"patched {name} -> 0.1.4")
     print("patched manifest.json -> 0.1.4")
     return 0
 

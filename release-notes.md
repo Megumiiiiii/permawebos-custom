@@ -1,5 +1,7 @@
 Personal build of the PermawebOS node APK (AndEE) and Chrome extension, upstream `permaweb/os` @ `2d1715c5`. Extension base is PermawebOS v0.1.3, patched to v0.1.4.
 
+The first extension zip on this tag had a service-worker syntax error (`Unexpected token '}'`) and would not register. The zip attached now loads: Chromium registers `core.js`, and the popup and side panel open.
+
 **Added in this build — Custom AI provider**
 - Extension: **Custom router** on node setup, on the connected-node provider form, and on the local provider form. Enter a base URL, API key, model, and **OpenAI-compatible** or **Anthropic-compatible**.
 - OpenAI-compatible (CommandCode, atmorouter-style routers, OpenRouter-likes) is stored as provider id `custom`. The node calls `{base}/chat/completions` with `Authorization: Bearer`.
