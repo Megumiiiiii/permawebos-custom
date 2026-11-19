@@ -1,0 +1,27 @@
+diff --git a/arch/android/android/app/src/main/java/org/permaweb/andee/SetupReviewSummary.kt b/arch/android/android/app/src/main/java/org/permaweb/andee/SetupReviewSummary.kt
+index 7c0e6a1..b6e4a22 100644
+--- a/arch/android/android/app/src/main/java/org/permaweb/andee/SetupReviewSummary.kt
++++ b/arch/android/android/app/src/main/java/org/permaweb/andee/SetupReviewSummary.kt
+@@ -14,6 +14,7 @@ internal object SetupReviewSummary {
+             "openrouter" -> "OpenRouter"
+             "openai" -> "OpenAI"
+             "anthropic" -> "Anthropic"
++            "custom" -> "Custom router"
+             "local-andee" -> "On-device AI"
+             "" -> "Not configured"
+             else -> "Custom provider"
+diff --git a/arch/android/android/app/src/test/java/org/permaweb/andee/SetupReviewSummaryTest.kt b/arch/android/android/app/src/test/java/org/permaweb/andee/SetupReviewSummaryTest.kt
+index 5a1c0d2..9b7e441 100644
+--- a/arch/android/android/app/src/test/java/org/permaweb/andee/SetupReviewSummaryTest.kt
++++ b/arch/android/android/app/src/test/java/org/permaweb/andee/SetupReviewSummaryTest.kt
+@@ -17,8 +17,8 @@ class SetupReviewSummaryTest {
+     }
+ 
+     @Test fun displaysTheSelectedProviderWithoutInferringOtherConnections() {
+-        for ((provider, label) in listOf("apus" to "Apus", "openrouter" to "OpenRouter",
+-            "local-andee" to "On-device AI", "" to "Not configured", "unknown-secret" to "Custom provider")) {
++        for ((provider, label) in listOf("apus" to "Apus", "custom" to "Custom router", "openrouter" to "OpenRouter",
++            "local-andee" to "On-device AI", "" to "Not configured", "unknown-secret" to "Custom provider")) {
+             assertEquals(label, SetupReviewSummary.rows("full", provider, emptyList(), wallet).toMap()["AI"])
+         }
+     }
