@@ -2,18 +2,53 @@
 
 Personal build of the **PermawebOS node APK** (AndEE — Android Execution Environment for
 [PermawebOS](https://github.com/permaweb/os)) with four changes on top of upstream `main`
-(`2d1715c5`, 2026-11-01):
+(`2d1715c5`, 2026-11-01), plus a patched Chrome extension (`0.1.4`) that can
+point inference at your own OpenAI-compatible or Anthropic-compatible base URL:
 
-1. **Node discovery no longer dead-ends when the tunnel is broken.** The screen used to sit on
+1. **Custom AI provider.** The extension can save a router base URL, API key, model, and wire
+   format. OpenAI-compatible routers (CommandCode, atmorouter-style gateways, OpenRouter-likes)
+   are stored as provider id `custom` and called at `{base}/chat/completions` with
+   `Authorization: Bearer`. Anthropic-compatible endpoints are stored as provider id `anthropic`
+   (that is how `inference@1.0` selects the Messages API) and called at `{base}/v1/messages`
+   with `x-api-key`. The key is encrypted to the node and kept under `priv`; it is not put in
+   the base URL, in `~meta@1.0`, or in an error string.
+2. **Node discovery no longer dead-ends when the tunnel is broken.** The screen used to sit on
    `TUNNEL UNAVAILABLE` / “Finding your node…” forever while a perfectly healthy node was listening
    on `127.0.0.1:8734`. It now falls back to the LAN origin (`http://<phone-ip>:8734`) so the QR code
    and “copy URL” keep working, and the status strip names the stage that failed.
-2. **Rose theme** (Tailwind pink, matched to megumii.xyz) instead of the navy/cyan ornament.
-3. **`versionName = custom`**, `versionCode = 3` — the screen reads `VERSION custom`.
-4. **Node wallet** — AR balance of the node identity, a signed transfer to any wallet, and a
+3. **Rose theme** (Tailwind pink, matched to megumii.xyz) instead of the navy/cyan ornament.
+4. **`versionName = custom`**, `versionCode = 4` — the screen reads `VERSION custom`.
+5. **Node wallet** — AR balance of the node identity, a signed transfer to any wallet, and a
    bundler-beneficiary switch staged for the next boot.
 
-Download the APK from [Releases](../../releases). Nothing here is upstream-supported.
+Download the APK and the patched extension zip from [Releases](../../releases). Nothing here is upstream-supported.
+
+## Custom AI provider
+
+Upstream’s extension only lists OpenAI, Anthropic, OpenRouter, and APUS, and it pins each of
+those to the vendor host. The node’s `inference@1.0` device already routes whatever `base-url`
+is stored on the provider; this build is the missing UI.
+
+In the extension, open the node’s **AI provider** form (setup, or “Add or change an API provider”
+after the node is connected) and choose **Custom router**:
+
+| field | what to enter |
+| --- | --- |
+| API format | **OpenAI-compatible** for `/chat/completions` + Bearer, or **Anthropic-compatible** for `/v1/messages` + `x-api-key` |
+| Base URL | The prefix the node joins with that path. `https://router.example/v1` becomes `https://router.example/v1/chat/completions`. Do not put the key in the URL. |
+| API key | Sent only as the auth header and stored under `inference-providers/<id>/priv/api-key`. |
+| Model ID | Required for a custom router. The first ID is `default-model`. |
+
+Anthropic-compatible uses provider id `anthropic`, so it replaces the built-in Anthropic slot’s
+base URL. OpenAI-compatible uses a separate id, `custom`, and leaves OpenAI and OpenRouter alone.
+The node review screen labels that id **Custom router**. Saving from the connected-node form
+encrypts the key to the node administrator key and upserts it through `~ouroboros@1.0/provider-admin`.
+The setup QR / `next.json` path writes the same private map into the next boot config. Neither path
+publishes the key to Arweave.
+
+`extension/custom-provider.js` is the request builder the patched bundles call. `node --test
+extension/custom-provider.test.mjs` points it at a mock OpenAI-compatible server and checks the
+path, Bearer header, model, and that a provider error cannot echo the key.
 
 ## Node wallet
 
@@ -81,22 +116,36 @@ cross-compiled OTP 28.5 + Rust + WAMR), so the runtime payload is **re-staged fr
 release APK** and only the app layer is rebuilt with Gradle:
 
 ```bash
-git clone https://github.com/permaweb/os && cd os
+git clone https://github.com/permaweb/os /tmp/permaweb-os
 ANDROID_SDK_ROOT=/opt/android-sdk JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
-  ./scripts/build.sh . PermawebOS-Node-0.11-81cba3e7.apk
+  ./scripts/build.sh /tmp/permaweb-os PermawebOS-Node-0.11-81cba3e7.apk
 ```
 
 `build.sh` applies `patches/*.patch`, stages the official runtime, runs
 `:app:testDebugUnitTest`, then `make -C arch/android apk` (`assembleDebug` +
 `verify-generic-andee-artifact.py`).
 
-`stage-official-runtime.py` verifies the official APK digest
-(`4eafb17e2fcca3c96ae33db69433057c432f4ba0baaad9a402d684221dee196c`), then copies
+`stage-official-runtime.py` accepts the official APK digest
+(`4eafb17e2fcca3c96ae33db69433057c432f4ba0baaad9a402d684221dee196c`) or any APK
+that still carries that runtime (`assets/andee-runtime.zip`
+`c1bbaad6c8691c3f808ed80921507361da84314af6660a6845ed7605970394c8`, which is what
+`v0.11-custom.2` contains). It then copies
 `assets/andee-runtime.zip`, `lib/{arm64-v8a,x86_64}/*.so` and the llama.cpp notice into the paths
 the repo's own `verifyGeneratedRuntime` contract demands.
 
 68 unit tests run, 6 of them proving the Arweave transfer format against a mined transaction.
 Upstream’s “never advertise LAN” tests are intentionally replaced by the LAN-fallback contract.
+The setup review labels provider id `custom` as **Custom router**.
+
+The extension is patched from an unpacked upstream build (v0.1.3), not rebuilt from
+source — that source is not in `permaweb/os`:
+
+```bash
+unzip PermawebOS-extension-0.1.3.zip -d /tmp/permawebos-ext
+python3 scripts/patch-extension.py /tmp/permawebos-ext/chrome
+( cd /tmp/permawebos-ext && zip -r -X PermawebOS-extension-custom-0.1.4.zip chrome )
+node --test extension/custom-provider.test.mjs
+```
 
 ## Provenance and licence
 

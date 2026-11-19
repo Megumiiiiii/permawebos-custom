@@ -8,7 +8,7 @@ index 842f11f..7d383dd 100644
          targetSdk = 36
 -        versionCode = 1
 -        versionName = "0.11"
-+        versionCode = 3
++        versionCode = 4
 +        versionName = "custom"
          val configuratorUrl = providers.gradleProperty("andeeConfiguratorUrl")
              .getOrElse("https://bundler.mystical.computer/GKWEPkK-GUJYx3JTAJ-aCR6ZgshVW9naSueDZOeiXhc~manifest@1.0/")
